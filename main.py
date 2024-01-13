@@ -2,6 +2,8 @@ from typing import Union
 
 from fastapi import FastAPI, HTTPException
 import yfinance as yf
+import json
+import pandas as pd
 
 app = FastAPI()
 
@@ -20,12 +22,23 @@ def fetch_earnings_data(symbol):
 def compute_sma(data, periods):
     return data['Adj Close'].rolling(window=periods).mean()
 
-@app.get("/sma/{symbol}&period={period}&start_date={start_date}&end_date={end_date}")
-async def get_sma(symbol: str, period, start_date: str = '2020-01-01', end_date: str = '2024-01-01'):
+@app.get("/upstocks")
+async def get_upstocks():
     try:
         # Fetch historical stock data
-        stock_data = fetch_stock_data(symbol, period, start_date, end_date)
-        print(stock_data)
+        with open("sp500_symbols.json", 'r') as file:
+            symbols = json.load(file)
+        print(symbols)
+
+        end_date = pd.Timestamp.today()
+        start_date = end_date - pd.DateOffset(months=6)
+        
+        # Benchmark return
+        spy_data = fetch_stock_data('SPY')
+        spy_ret = ((spy_data['Adj Close'].iloc[-1] / spy_data['Adj Close'].iloc[0]) - 1) * 100
+
+        for symbol in symbols:
+          stock_data = fetch_stock_data(symbol, "1mo", start_date, end_date)
 
         # Fetch historical earnings data
         # earnings_data = fetch_earnings_data(symbol)
@@ -36,12 +49,6 @@ async def get_sma(symbol: str, period, start_date: str = '2020-01-01', end_date:
         stock_data['100SMA'] = compute_sma(stock_data, 100)
         stock_data['150SMA'] = compute_sma(stock_data, 150)
         stock_data['200SMA'] = compute_sma(stock_data, 200)
-
-        # Compute Market Cap
-        stock_data['MarketCap'] = stock_data['Adj Close'] * stock_data['Volume']
-
-        # Compute Relative Strength against SPY
-        stock_data['RelativeStrength'] = stock_data['Adj Close'] / stock_data['Close'].mean()
 
         # Check if current price is above 20 SMA
         stock_data['Above20SMA'] = stock_data['Adj Close'] > stock_data['20SMA']
@@ -54,6 +61,10 @@ async def get_sma(symbol: str, period, start_date: str = '2020-01-01', end_date:
 
         # Check if all smas are aligned uptrend
         stock_data['Uptrend_Signal'] = stock_data[['Above20SMA', '20SMA_Above_50SMA', '50SMA_Above_100SMA', '100SMA_Above_150SMA', '150SMA_Above_200SMA']].all(axis="columns")
+
+        stock_ret = ((stock_data['Adj Close'].iloc[-1] / stock_data['Adj Close'].iloc[0]) - 1) * 100
+        rs = stock_ret / spy_ret 
+        stock_data["RS"] = rs
         
 
         # Compute EPS growth
@@ -71,7 +82,7 @@ async def get_sma(symbol: str, period, start_date: str = '2020-01-01', end_date:
         # stock_data['EPSGrowth'] = eps_growth
 
         # Return the computed data
-        sma_data = stock_data[['Date', 'Open', 'High', 'Low', 'Adj Close', 'Volume', 'MarketCap', 'RelativeStrength', 'Above20SMA',
+        sma_data = stock_data[['Date', 'Open', 'High', 'Low', 'Adj Close', 'Volume', 'RS', 'Above20SMA', 'Above20SMA', '20SMA_Above_50SMA', '50SMA_Above_100SMA', '100SMA_Above_150SMA', '150SMA_Above_200SMA',
                                'Uptrend_Signal']].dropna()
         print(sma_data)
         return {"symbol": symbol, "data": sma_data.to_dict(orient='records')}
