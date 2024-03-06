@@ -1,107 +1,189 @@
-from typing import Union
-
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
 import yfinance as yf
-import json
 import pandas as pd
+import numpy as np
+from pydantic import BaseModel
 
 app = FastAPI()
 
-def fetch_stock_data(symbol, period: str = "1mo", start_date: str = "2020-01-01", end_date: str = "2024-01-01"):
+origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class Item(BaseModel):
+    initialBalance: int
+    startYear: int
+    endYear: int
+    assets: list
+
+@app.get("/msp/stocks/{symbol}")
+def retrieve_stock_name(symbol: str):
     try:
-        stock_data = yf.download(symbol, period=period, start=start_date, end=end_date)
-        stock_data.reset_index(inplace=True)
-        return stock_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+      data = yf.Ticker(symbol).info
+      companyName = data['longName']
+      return ({'name': companyName})
+    except:
+       raise HTTPException(status_code=404, detail="Symbol data not found")
 
-def fetch_earnings_data(symbol):
-    earnings_data = yf.get_earnings_calendar(symbol)
-    return earnings_data
+@app.post("/msp/stats")
+async def portfolio_stats(portfolio: Item):
+    stocks = []
+    weights = []
+    for asset in portfolio.assets:
+        stocks.append(asset['symbol'])
+        weights.append(int(asset['weight'])/100)
     
-def compute_sma(data, periods):
-    return data['Adj Close'].rolling(window=periods).mean()
+    final_balance = compute_final_balance(portfolio.initialBalance, stocks, weights, portfolio.startYear, portfolio.endYear)
+    mdd = compute_mdd(stocks, weights, portfolio.startYear, portfolio.endYear)
+    port_cagr = compute_cagr(stocks, weights, portfolio.startYear, portfolio.endYear)
+    port_vol = compute_portfolio_volatility(stocks, weights, portfolio.startYear, portfolio.endYear)
+    sharpe = compute_sharpe_ratio(stocks, weights, portfolio.startYear, portfolio.endYear, risk_free=0.05)
 
-@app.get("/upstocks")
-async def get_upstocks():
-    try:
-        # Fetch historical stock data
-        with open("sp500_symbols.json", 'r') as file:
-            symbols = json.load(file)
-        print(symbols)
+    dd_data = drawdown_data(stocks, weights, portfolio.startYear, portfolio.endYear)
+    growth_data = port_growth_data(stocks, weights, portfolio.startYear, portfolio.endYear)
 
-        end_date = pd.Timestamp.today()
-        start_date = end_date - pd.DateOffset(months=6)
-        
-        # Benchmark return
-        spy_data = fetch_stock_data('SPY')
-        spy_ret = ((spy_data['Adj Close'].iloc[-1] / spy_data['Adj Close'].iloc[0]) - 1) * 100
-
-        for symbol in symbols:
-          stock_data = fetch_stock_data(symbol, "1mo", start_date, end_date)
-
-        # Fetch historical earnings data
-        # earnings_data = fetch_earnings_data(symbol)
-
-        # Compute SMAs for different periods
-        stock_data['20SMA'] = compute_sma(stock_data, 20)
-        stock_data['50SMA'] = compute_sma(stock_data, 50)
-        stock_data['100SMA'] = compute_sma(stock_data, 100)
-        stock_data['150SMA'] = compute_sma(stock_data, 150)
-        stock_data['200SMA'] = compute_sma(stock_data, 200)
-
-        # Check if current price is above 20 SMA
-        stock_data['Above20SMA'] = stock_data['Adj Close'] > stock_data['20SMA']
-
-        # Check if lower time SMAs are above higher time SMAs
-        stock_data['20SMA_Above_50SMA'] = stock_data['20SMA'] > stock_data['50SMA']
-        stock_data['50SMA_Above_100SMA'] = stock_data['50SMA'] > stock_data['100SMA']
-        stock_data['100SMA_Above_150SMA'] = stock_data['100SMA'] > stock_data['150SMA']
-        stock_data['150SMA_Above_200SMA'] = stock_data['150SMA'] > stock_data['200SMA']
-
-        # Check if all smas are aligned uptrend
-        stock_data['Uptrend_Signal'] = stock_data[['Above20SMA', '20SMA_Above_50SMA', '50SMA_Above_100SMA', '100SMA_Above_150SMA', '150SMA_Above_200SMA']].all(axis="columns")
-
-        stock_ret = ((stock_data['Adj Close'].iloc[-1] / stock_data['Adj Close'].iloc[0]) - 1) * 100
-        rs = stock_ret / spy_ret 
-        stock_data["RS"] = rs
-        
-
-        # Compute EPS growth
-        # eps_growth = []
-        # for index, row in stock_data.iterrows():
-        #     try:
-        #         earnings_info = earnings_data.loc[index]
-        #         current_eps = earnings_info['epsEstimate']['raw']
-        #         previous_eps = earnings_info['epsActual']['raw']
-        #         growth = ((current_eps - previous_eps) / abs(previous_eps)) * 100
-        #         eps_growth.append(growth)
-        #     except KeyError:
-        #         eps_growth.append(None)
-
-        # stock_data['EPSGrowth'] = eps_growth
-
-        # Return the computed data
-        sma_data = stock_data[['Date', 'Open', 'High', 'Low', 'Adj Close', 'Volume', 'RS', 'Above20SMA', 'Above20SMA', '20SMA_Above_50SMA', '50SMA_Above_100SMA', '100SMA_Above_150SMA', '150SMA_Above_200SMA',
-                               'Uptrend_Signal']].dropna()
-        print(sma_data)
-        return {"symbol": symbol, "data": sma_data.to_dict(orient='records')}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching data for {symbol}: {e}")
+    return {'final_bal': final_balance, 'mdd': mdd, 'port_cagr': port_cagr, 'port_vol': port_vol, 'sharpe': sharpe, 'dd_data': dd_data, 'growth_data': growth_data}
 
 
+def compute_mdd(stocks, weights, start_year:int, end_year:int):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
 
+    df = pd.DataFrame()
 
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
 
-# def retrieve_ticker_data(ticker: str, window_size: int = 20, period: str = '1mo'):
-#     stock_data = get_stock_data(ticker, period=period)
+    # compute daily returns
+    daily_returns = df.pct_change().dropna()
+    # compute portfolio daily returns
+    daily_returns['port'] = daily_returns.dot(weights_np)
 
-#     if stock_data.empty:
-#         raise HTTPException(status_code=404, detail=f"No data available for {ticker}")
+    cumulative_returns = (1 + daily_returns).cumprod()
+    cumulative_returns.fillna(1, inplace=True)
 
-#     stock_data['MA'] = stock_data['Close'].rolling(window=window_size).mean()
+    portfolio_cumulative_returns = cumulative_returns['port']
+
+    previous_peaks = portfolio_cumulative_returns.cummax()
+    drawdown = (portfolio_cumulative_returns - previous_peaks) / previous_peaks
+    mdd = drawdown.min()
+    return mdd
+
+def drawdown_data(stocks, weights, start_year:int, end_year:int):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
+
+    df = pd.DataFrame()
+
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
+
+    # compute daily returns
+    daily_returns = df.pct_change().dropna()
+    # compute portfolio daily returns
+    daily_returns['port'] = daily_returns.dot(weights_np)
+
+    cumulative_returns = (1 + daily_returns).cumprod()
+    cumulative_returns.fillna(1, inplace=True)
+
+    portfolio_cumulative_returns = cumulative_returns['port']
+
+    previous_peaks = portfolio_cumulative_returns.cummax()
+    drawdown = (portfolio_cumulative_returns - previous_peaks) / previous_peaks
+    return drawdown.to_json()
+
+def port_growth_data(stocks, weights, start_year:int, end_year:int):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
+
+    df = pd.DataFrame()
+
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
+
+    # compute daily returns
+    daily_returns = df.pct_change().dropna()
+    # compute portfolio daily returns
+    daily_returns['port'] = daily_returns.dot(weights_np)
+
+    cumulative_returns = (1 + daily_returns).cumprod()
+    cumulative_returns.fillna(1, inplace=True)
+
+    portfolio_cumulative_returns = cumulative_returns['port']
+    return portfolio_cumulative_returns.to_json()
+
+def compute_cagr(stocks, weights, start_year:int, end_year:int):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
+
+    df = pd.DataFrame()
+
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
+
+    daily_returns = df.pct_change()
+
+    cumulative_returns = (1 + daily_returns).cumprod()
+    cumulative_returns.fillna(1,inplace=True)
+    cagr = cumulative_returns**(252/len(cumulative_returns.index)) - 1
+
+    portfolio_cagr = np.dot(cagr.iloc[-1,:],weights_np)
+    return portfolio_cagr
+
+def compute_portfolio_volatility(stocks, weights, start_year:int, end_year:int):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
+
+    df = pd.DataFrame()
+
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
+
+    daily_returns = df.pct_change()
+
+    # From daily returns to portfolio volatility
+
+    cov_matrix = daily_returns.cov() * 252
+
+    # Calculate the portfolio variance
+
+    portfolio_vol = np.sqrt(np.dot(weights_np.T, np.dot(cov_matrix, weights_np)))
+    return portfolio_vol
+
+def compute_sharpe_ratio(stocks, weights, start_year:int, end_year:int, risk_free = 0.0):
+    port_cagr = compute_cagr(stocks, weights, start_year, end_year)
+    port_vol = compute_portfolio_volatility(stocks, weights, start_year, end_year)
+    return (port_cagr - risk_free) / port_vol
+
+def compute_final_balance(balance, stocks, weights, start_year:int, end_year:int, risk_free = 0.0):
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-01-01"
+    weights_np = np.array(weights)
+
+    df = pd.DataFrame()
+
+    for stock in stocks:
+        df[stock] = yf.Ticker(stock).history(period='max', start=start_date, end=end_date)['Close']
+
+    daily_returns = df.pct_change().dropna()
+    daily_returns['port'] = daily_returns.dot(weights_np)
+
+    cumulative_returns = (1 + daily_returns).cumprod()
+    cumulative_returns.fillna(1, inplace=True)
+
+    portfolio_cumulative_returns = cumulative_returns['port']
+    return balance * portfolio_cumulative_returns.iloc[-1]
     
-#     result = stock_data[['Close', 'MA']].dropna().to_dict(orient='records')
-
-#     return result
