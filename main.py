@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+origins = ["http://localhost:3000", "http://127.0.0.1:3000", "https://my-stock-portfolio.vercel.app"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,10 +47,10 @@ async def portfolio_stats(portfolio: Item):
     port_vol = compute_portfolio_volatility(stocks, weights, portfolio.startYear, portfolio.endYear)
     sharpe = compute_sharpe_ratio(stocks, weights, portfolio.startYear, portfolio.endYear, risk_free=0.05)
 
-    dd_data = drawdown_data(stocks, weights, portfolio.startYear, portfolio.endYear)
-    growth_data = port_growth_data(stocks, weights, portfolio.startYear, portfolio.endYear)
+    # dd_data = drawdown_data(stocks, weights, portfolio.startYear, portfolio.endYear)
+    # growth_data = port_growth_data(stocks, weights, portfolio.startYear, portfolio.endYear)
 
-    return {'final_bal': final_balance, 'mdd': mdd, 'port_cagr': port_cagr, 'port_vol': port_vol, 'sharpe': sharpe, 'dd_data': dd_data, 'growth_data': growth_data}
+    return {'final_bal': final_balance, 'mdd': mdd, 'port_cagr': port_cagr, 'port_vol': port_vol, 'sharpe': sharpe}
 
 
 def compute_mdd(stocks, weights, start_year:int, end_year:int):
@@ -78,9 +78,16 @@ def compute_mdd(stocks, weights, start_year:int, end_year:int):
     mdd = drawdown.min()
     return mdd
 
-def drawdown_data(stocks, weights, start_year:int, end_year:int):
-    start_date = f"{start_year}-01-01"
-    end_date = f"{end_year}-01-01"
+@app.post("/msp/portfolio-drawdown")
+def drawdown_data(portfolio: Item):
+    stocks = []
+    weights = []
+    for asset in portfolio.assets:
+        stocks.append(asset['symbol'])
+        weights.append(int(asset['weight'])/100)
+
+    start_date = f"{portfolio.startYear}-01-01"
+    end_date = f"{portfolio.endYear}-01-01"
     weights_np = np.array(weights)
 
     df = pd.DataFrame()
@@ -100,11 +107,21 @@ def drawdown_data(stocks, weights, start_year:int, end_year:int):
 
     previous_peaks = portfolio_cumulative_returns.cummax()
     drawdown = (portfolio_cumulative_returns - previous_peaks) / previous_peaks
-    return drawdown.to_json()
+    return {'data': drawdown.to_json()}
 
-def port_growth_data(stocks, weights, start_year:int, end_year:int):
-    start_date = f"{start_year}-01-01"
-    end_date = f"{end_year}-01-01"
+@app.post("/msp/portfolio-growth")
+def port_growth_data(portfolio: Item):
+    
+    stocks = []
+    weights = []
+    for asset in portfolio.assets:
+        stocks.append(asset['symbol'])
+        weights.append(int(asset['weight'])/100)
+
+    
+        
+    start_date = f"{portfolio.startYear}-01-01"
+    end_date = f"{portfolio.endYear}-01-01"
     weights_np = np.array(weights)
 
     df = pd.DataFrame()
@@ -121,7 +138,7 @@ def port_growth_data(stocks, weights, start_year:int, end_year:int):
     cumulative_returns.fillna(1, inplace=True)
 
     portfolio_cumulative_returns = cumulative_returns['port']
-    return portfolio_cumulative_returns.to_json()
+    return {'data': portfolio_cumulative_returns.to_json()}
 
 def compute_cagr(stocks, weights, start_year:int, end_year:int):
     start_date = f"{start_year}-01-01"
