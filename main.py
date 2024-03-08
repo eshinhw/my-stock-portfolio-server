@@ -47,9 +47,6 @@ async def portfolio_stats(portfolio: Item):
     port_vol = compute_portfolio_volatility(stocks, weights, portfolio.startYear, portfolio.endYear)
     sharpe = compute_sharpe_ratio(stocks, weights, portfolio.startYear, portfolio.endYear, risk_free=0.05)
 
-    # dd_data = drawdown_data(stocks, weights, portfolio.startYear, portfolio.endYear)
-    # growth_data = port_growth_data(stocks, weights, portfolio.startYear, portfolio.endYear)
-
     return {'final_bal': final_balance, 'mdd': mdd, 'port_cagr': port_cagr, 'port_vol': port_vol, 'sharpe': sharpe}
 
 
